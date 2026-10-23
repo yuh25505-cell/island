@@ -141,4 +141,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: 岛屿测试-APK
-          path: android/app/build/outputs/apk/release/岛屿.apk
+          path: android/app/build/outputs/apk/release/岛屿测试.apk

@@ -10,6 +10,8 @@ on:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    env:
+      APK_NAME: 岛屿测试
 
     steps:
       - name: Checkout source
@@ -117,7 +119,7 @@ jobs:
 
           UNSIGNED_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           ALIGNED_APK="android/app/build/outputs/apk/release/app-release-aligned.apk"
-          FINAL_APK="android/app/build/outputs/apk/release/岛屿.apk"
+          FINAL_APK="android/app/build/outputs/apk/release/${APK_NAME}.apk"
 
           "$BUILD_TOOLS/zipalign" -f -p 4 \
             "$UNSIGNED_APK" \
@@ -140,5 +142,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: 岛屿测试-APK
-          path: android/app/build/outputs/apk/release/岛屿测试.apk
+          name: ${{ env.APK_NAME }}-APK
+          path: android/app/build/outputs/apk/release/${{ env.APK_NAME }}.apk
+          if-no-files-found: error

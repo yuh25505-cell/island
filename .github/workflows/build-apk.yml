@@ -68,8 +68,8 @@ jobs:
         run: |
           cat > capacitor.config.json <<'EOF'
           {
-            "appId": "com.daoyu.islandworldbook",
-            "appName": "岛屿",
+            "appId": "com.daoyu.islandworldbook.test",
+            "appName": "岛屿测试",
             "webDir": "www"
           }
           EOF

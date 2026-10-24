@@ -505,33 +505,16 @@ const mainActivityJava = `package ${appId};
 
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.webkit.WebView;
 
 import androidx.activity.OnBackPressedCallback;
-import androidx.core.splashscreen.SplashScreen;
 
 import com.getcapacitor.BridgeActivity;
-import com.getcapacitor.WebViewListener;
 
 public class MainActivity extends BridgeActivity {
     public static final String EXTRA_DEEP_LINK = "island_deep_link";
     public static final String EXTRA_CANCEL_TAG = "island_cancel_tag";
     public static final String EXTRA_CANCEL_ID = "island_cancel_id";
-
-    // Keep the Android launch surface in place until the local WebView has committed
-    // its first visible frame. This smooths the native-to-web handoff without changing
-    // the website's loading animation or delaying its animation clock under the splash.
-    private volatile boolean nativeSplashReady = false;
-    private final Handler nativeSplashHandler = new Handler(Looper.getMainLooper());
-
-    private void notifyWebStartupSplashFinished() {
-        final WebView webView = getBridge() == null ? null : getBridge().getWebView();
-        if (webView == null) return;
-        webView.post(() -> webView.evaluateJavascript(
-            "try{window.dispatchEvent(new Event('island-native-splash-released'));}catch(e){}", null));
-    }
 
     /** 当前页面的 WebView（弱引用）：来电通知的「拒接」按钮不拉起界面，由广播接收器直接把动作交给页面。 */
     private static volatile java.lang.ref.WeakReference<WebView> webViewRef = null;
@@ -627,39 +610,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // Android's compat splash API must be installed before BridgeActivity.onCreate().
-        // Keep it over the WebView's first visible frame, then fade it away (never slide it).
-        SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
-        splashScreen.setKeepOnScreenCondition(() -> !nativeSplashReady);
-        splashScreen.setOnExitAnimationListener(splashView -> {
-            splashView.getView().animate()
-                .alpha(0f)
-                .setDuration(180L)
-                .withEndAction(() -> {
-                    splashView.remove();
-                    notifyWebStartupSplashFinished();
-                })
-                .start();
-        });
-
-        // Register the listener before BridgeActivity creates its Bridge/WebView.
-        bridgeBuilder.addWebViewListener(new WebViewListener() {
-            @Override
-            public void onPageCommitVisible(WebView view, String url) {
-                if (url == null ||
-                    !(url.startsWith("https://localhost") || url.startsWith("http://localhost"))) {
-                    return;
-                }
-                // Let the committed frame pass two animation callbacks before removing the splash.
-                view.postOnAnimation(() -> view.postOnAnimation(() -> nativeSplashReady = true));
-            }
-        });
-
         super.onCreate(savedInstanceState);
-
-        // Safety fallback for devices/WebView versions where onPageCommitVisible is not delivered.
-        nativeSplashHandler.postDelayed(() -> nativeSplashReady = true, 2800L);
-
         // 冷启动：被通知拉起时把链接放进待处理，页面加载完成后由前端取走。
         // savedInstanceState != null 只是系统重建（如旋转），不应重复打开。
         if (savedInstanceState == null) {
@@ -841,40 +792,15 @@ if (!gradle.includes(`versionName "${version}"`)) {
 }
 fs.writeFileSync(gradlePath, gradle, 'utf8');
 
-// Adjust the packaged index.html (www/) for the APK only:
-//  1. hold the web loading animation until the native launch surface has faded out,
-//  2. remove the leftover "CapDiag" startup toast script,
-//  3. load api-backup.js after app.js and inline native-shim.js before </body>.
-// The root website source remains untouched; the hold exists only in generated www/.
+// Adjust the packaged index.html (www/) for the APK:
+//  1. remove the leftover "CapDiag" startup toast script,
+//  2. load api-backup.js (export / import of API settings) after app.js,
+//  3. inline native-shim.js before </body> so it runs before the deferred app.js
+//     (Capacitor.registerPlugin shim + saving backups into Download/岛屿).
 const wwwIndexPath = path.join(root, 'www', 'index.html');
 const shimSourcePath = path.join(root, 'native-shim.js');
 if (fs.existsSync(wwwIndexPath)) {
   let html = fs.readFileSync(wwwIndexPath, 'utf8');
-
-  if (!html.includes('id="island-native-startup-hold-style"')) {
-    const nativeStartupBootstrap = `
-<script id="island-native-startup-hold-bootstrap">
-(function () {
-  document.documentElement.classList.add('island-native-startup-hold');
-  window.__islandNativeStartupReleased = false;
-  // Register before stylesheets and deferred JS so an early native callback is not lost.
-  window.addEventListener('island-native-splash-released', function () {
-    window.__islandNativeStartupReleased = true;
-    document.documentElement.classList.remove('island-native-startup-hold');
-  }, { once: true });
-})();
-</script>
-<style id="island-native-startup-hold-style">
-html.island-native-startup-hold #boot,
-html.island-native-startup-hold #boot *,
-html.island-native-startup-hold #boot::before,
-html.island-native-startup-hold #boot::after {
-  animation-play-state: paused !important;
-}
-</style>
-`;
-    html = html.replace(/<head\b[^>]*>/i, (headTag) => headTag + nativeStartupBootstrap);
-  }
 
   html = html.replace(/<script>\s*\(function\(\)\{\s*function showDiag\(\)[\s\S]*?<\/script>\s*/, '');
 
@@ -892,85 +818,6 @@ html.island-native-startup-hold #boot::after {
   }
 
   fs.writeFileSync(wwwIndexPath, html, 'utf8');
-
-  // Defer only the APK copy of the boot canvas/progress clock. The website's source
-  // js-main.js and CSS animation stay exactly as they are.
-  const bootJsPath = path.join(root, 'www', 'js-main.js');
-  if (fs.existsSync(bootJsPath)) {
-    let bootJs = fs.readFileSync(bootJsPath, 'utf8');
-    if (!bootJs.includes('function releaseNativeStartupHold()')) {
-      const holdVarAnchor = "  var prefersReduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);\n  var width = 0, height = 0, dpr = 1, raf = 0, destroyed = false;";
-      const holdVarReplacement = "  var prefersReduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);\n  var nativeStartupHold = document.documentElement.classList.contains('island-native-startup-hold');\n  var width = 0, height = 0, dpr = 1, raf = 0, destroyed = false;";
-      if (!bootJs.includes(holdVarAnchor)) throw new Error('Could not find boot animation hold variable anchor in www/js-main.js');
-      bootJs = bootJs.replace(holdVarAnchor, holdVarReplacement);
-
-      // Do not let pointer or tab visibility callbacks start RAF before native handoff.
-      bootJs = bootJs.replace(
-        "    if(!prefersReduced && !raf) raf=window.requestAnimationFrame(frame);",
-        "    if(!nativeStartupHold && !prefersReduced && !raf) raf=window.requestAnimationFrame(frame);"
-      );
-      bootJs = bootJs.replace(
-        "    else if(!destroyed && !prefersReduced){raf=window.requestAnimationFrame(frame);}",
-        "    else if(!destroyed && !nativeStartupHold && !prefersReduced){raf=window.requestAnimationFrame(frame);}"
-      );
-
-      const initAnchor = `  refreshColor();
-  if(wordEl) wordSet(prefersReduced?'CREATE':'THINK');
-  resize();
-  if(!prefersReduced) raf=window.requestAnimationFrame(frame);
-  else {
-    updateTypography(performance.now());
-    if(progressEl) progressEl.textContent='100%';
-    if(loadingText) loadingText.textContent='ALL YOUR THINGS, IN PLACE';
-    paint(performance.now(),false);
-  }
-  /* CSS owns the exit choreography; this timeout only prevents an unusual stuck overlay. */
-  setTimeout(function(){var node=document.getElementById('boot');if(node&&node.style.display!=='none')node.style.display='none';destroyed=true;if(raf)window.cancelAnimationFrame(raf);},3500);
-`;
-      const initReplacement = `  var bootMotionStarted = false;
-  function startBootMotion(){
-    if(bootMotionStarted) return;
-    bootMotionStarted = true;
-    startAt = performance.now();
-    if(!width || !height) resize();
-    else paint(performance.now(), false);
-    if(!prefersReduced){
-      if(!raf) raf=window.requestAnimationFrame(frame);
-    } else {
-      updateTypography(performance.now());
-      if(progressEl) progressEl.textContent='100%';
-      if(loadingText) loadingText.textContent='ALL YOUR THINGS, IN PLACE';
-      paint(performance.now(),false);
-    }
-    /* CSS owns the exit choreography; this timeout only prevents an unusual stuck overlay. */
-    window.setTimeout(function(){var node=document.getElementById('boot');if(node&&node.style.display!=='none')node.style.display='none';destroyed=true;if(raf)window.cancelAnimationFrame(raf);raf=0;},3500);
-  }
-  function releaseNativeStartupHold(){
-    if(!nativeStartupHold) return;
-    nativeStartupHold = false;
-    document.documentElement.classList.remove('island-native-startup-hold');
-    startBootMotion();
-  }
-
-  refreshColor();
-  if(wordEl) wordSet(prefersReduced?'CREATE':'THINK');
-  resize();
-  if(nativeStartupHold){
-    window.addEventListener('island-native-splash-released', releaseNativeStartupHold, {once:true});
-    // Defensive fallback if native notification is unavailable; normally native owns this handoff.
-    window.setTimeout(function(){
-      if(!nativeStartupHold) return;
-      window.dispatchEvent(new Event('island-native-splash-released'));
-    },3500);
-  } else {
-    startBootMotion();
-  }
-`;
-      if (!bootJs.includes(initAnchor)) throw new Error('Could not find boot animation initialization anchor in www/js-main.js');
-      bootJs = bootJs.replace(initAnchor, initReplacement);
-      fs.writeFileSync(bootJsPath, bootJs, 'utf8');
-    }
-  }
 }
 
 console.log(`Applied Android native integrations for ${appId} (${version}, versionCode ${versionCode}).`);
